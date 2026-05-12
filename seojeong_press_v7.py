@@ -94,12 +94,11 @@ WRITING_STYLE_GUIDE = """
 
 # 톤·금기사항
 - 정중하고 절제된 저널리즘 어조 (~했다, ~라고 밝혔다)
-
-# 총장 멘트 어조 원칙
-- 구어체, 감탄사, 감성적 수사 금지 ("정말 자랑스럽다", "아름다운 도전" 등)
-- 기관장 공식 발언 형식 유지 ("~에 매진하겠습니다", "~를 다하겠습니다")
-- 성과 → 의미 부여 → 향후 방향 3단 구조로 간결하게
-- 따옴표 안 문장은 반드시 존댓말 종결어미 (~겠습니다, ~바랍니다)
+- 한자, 외국 문자 절대 금지
+- 부정적 정보·경쟁 대학 비교·미확정 사실 금지
+- 광고 어조 형용사("최고의", "유일한" 등) 객관 지표로 대체
+- 학과·기관·인물은 정식 명칭 사용
+- 마크다운 헤더(#, ##) 사용 금지
 """
 
 
@@ -121,7 +120,7 @@ LENGTH_PROFILES = {
 - 미사여구·중복 표현 최소화. 사실 위주로 빠르게 마무리.
 """,
         "json_body_hint": "본문 400~600자, 단락 2~3개",
-        "max_tokens": 1024,
+        "max_tokens": 2048,
     },
     "표준": {
         "caption": "900~1300자",
@@ -137,7 +136,7 @@ LENGTH_PROFILES = {
 - 정부 인증·사업 명칭 1개 이상 언급
 """,
         "json_body_hint": "본문 900~1300자, 단락 4~5개, 단락 간 \\n\\n 구분",
-        "max_tokens": 2048,
+        "max_tokens": 4096,
     },
     "특집": {
         "caption": "1800~2800자",
@@ -161,7 +160,7 @@ LENGTH_PROFILES = {
 - 정부 인증·사업: 2~3개 이상 언급
 """,
         "json_body_hint": "본문 1800~2800자, 단락 8~12개, 단락 간 \\n\\n 구분. 마크다운 소제목(##)은 절대 사용 금지",
-        "max_tokens": 4096,
+        "max_tokens": 8192,
     },
 }
 
@@ -465,43 +464,37 @@ AUTO_MODEL_FALLBACK = [
 
 def call_gemini(prompt, api_key, temperature=0.5,
                 max_output_tokens=2048, force_json=True):
-    """Gemini API 자동 호출. 모델을 순서대로 시도해 404를 방지."""
+    """Gemini API 자동 호출. 모델 폴백 + 빈 응답 재시도."""
     genai.configure(api_key=api_key)
-    generation_config = {
-        "temperature": temperature,
-        "top_p": 0.9,
-        "max_output_tokens": max_output_tokens,
-    }
-    if force_json:
-        generation_config["response_mime_type"] = "application/json"
 
     last_error = None
     for model_name in AUTO_MODEL_FALLBACK:
-        try:
-            model = genai.GenerativeModel(
-                model_name=model_name,
-                generation_config=generation_config,
-            )
-            resp = model.generate_content(prompt)
-            return resp.text, model_name   # 성공 시 모델명도 함께 반환
-        except gexc.NotFound:
-            last_error = f"{model_name}: 모델 없음(404)"
-            continue
-        except gexc.InvalidArgument as e:
-            # response_mime_type을 지원하지 않는 모델 → JSON 강제 없이 재시도
+        for use_json_mime in ([True, False] if force_json else [False]):
+            generation_config = {
+                "temperature": temperature,
+                "top_p": 0.9,
+                "max_output_tokens": max_output_tokens,
+            }
+            if use_json_mime:
+                generation_config["response_mime_type"] = "application/json"
             try:
-                cfg2 = {k: v for k, v in generation_config.items()
-                        if k != "response_mime_type"}
-                model2 = genai.GenerativeModel(model_name=model_name,
-                                               generation_config=cfg2)
-                resp = model2.generate_content(prompt)
-                return resp.text, model_name
-            except Exception as e2:
-                last_error = f"{model_name}: {e2}"
+                model = genai.GenerativeModel(
+                    model_name=model_name,
+                    generation_config=generation_config,
+                )
+                resp = model.generate_content(prompt)
+                text = resp.text.strip() if resp.text else ""
+                if text:
+                    return text, model_name
+                # 빈 응답 → JSON mime 없이 재시도
+                last_error = f"{model_name}: 빈 응답"
                 continue
-        except Exception as e:
-            last_error = f"{model_name}: {e}"
-            continue
+            except gexc.NotFound:
+                last_error = f"{model_name}: 모델 없음(404)"
+                break   # 이 모델은 없으니 다음 모델로
+            except Exception as e:
+                last_error = f"{model_name}: {e}"
+                break
 
     raise RuntimeError(f"모든 모델 시도 실패. 마지막 오류: {last_error}")
 
@@ -1072,7 +1065,14 @@ with tab_compose:
                 final = draft
 
             if not final["title"] or not final["body"]:
-                st.error("생성 결과가 비어 있습니다. 입력을 더 구체적으로 작성해 보세요.")
+                with st.expander("🔍 디버그: 모델 원본 응답 확인", expanded=True):
+                    st.code(raw1[:2000], language="json")
+                st.error(
+                    "생성 결과가 비어 있습니다. 다음을 확인해 보세요:\n"
+                    "- 상세 사실관계 입력이 충분한지 (더 구체적으로)\n"
+                    "- 위 디버그 박스에서 모델이 뭘 반환했는지\n"
+                    "- 잠시 후 다시 시도"
+                )
                 st.stop()
 
             # (4) 분량 검증 표시
