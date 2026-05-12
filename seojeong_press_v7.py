@@ -120,7 +120,7 @@ LENGTH_PROFILES = {
 - 미사여구·중복 표현 최소화. 사실 위주로 빠르게 마무리.
 """,
         "json_body_hint": "본문 400~600자, 단락 2~3개",
-        "max_tokens": 2048,
+        "max_tokens": 1024,
     },
     "표준": {
         "caption": "900~1300자",
@@ -136,7 +136,7 @@ LENGTH_PROFILES = {
 - 정부 인증·사업 명칭 1개 이상 언급
 """,
         "json_body_hint": "본문 900~1300자, 단락 4~5개, 단락 간 \\n\\n 구분",
-        "max_tokens": 4096,
+        "max_tokens": 6144,
     },
     "특집": {
         "caption": "1800~2800자",
@@ -160,7 +160,7 @@ LENGTH_PROFILES = {
 - 정부 인증·사업: 2~3개 이상 언급
 """,
         "json_body_hint": "본문 1800~2800자, 단락 8~12개, 단락 간 \\n\\n 구분. 마크다운 소제목(##)은 절대 사용 금지",
-        "max_tokens": 8192,
+        "max_tokens": 4096,
     },
 }
 
@@ -457,44 +457,40 @@ def mask_rag_context(text):
 # ============================================================
 # 자동 시도할 모델 우선순위 (위에서부터 시도, 실패 시 다음 모델)
 AUTO_MODEL_FALLBACK = [
-    "gemini-2.5-flash",
-    "gemini-1.5-flash",
-    "gemini-1.5-pro",
+    "gemini-2.0-flash",        # 1순위: thinking 없음, 안정적
+    "gemini-2.0-flash-lite",   # 백업
+    "gemini-2.5-pro",          # 고품질 (RPM 150)
+    "gemini-flash-latest",     # 별칭 (SDK가 최신 매핑)
+    "gemini-2.5-flash",        # 마지막 — thinking 모드라 토큰 낭비 가능
 ]
 
 def call_gemini(prompt, api_key, temperature=0.5,
                 max_output_tokens=2048, force_json=True):
-    """Gemini API 자동 호출. 모델 폴백 + 빈 응답 재시도."""
+    """Gemini API 자동 호출. 모델 폴백."""
     genai.configure(api_key=api_key)
 
     last_error = None
     for model_name in AUTO_MODEL_FALLBACK:
-        for use_json_mime in ([True, False] if force_json else [False]):
-            generation_config = {
-                "temperature": temperature,
-                "top_p": 0.9,
-                "max_output_tokens": max_output_tokens,
-            }
-            if use_json_mime:
-                generation_config["response_mime_type"] = "application/json"
-            try:
-                model = genai.GenerativeModel(
-                    model_name=model_name,
-                    generation_config=generation_config,
-                )
-                resp = model.generate_content(prompt)
-                text = resp.text.strip() if resp.text else ""
-                if text:
-                    return text, model_name
-                # 빈 응답 → JSON mime 없이 재시도
-                last_error = f"{model_name}: 빈 응답"
-                continue
-            except gexc.NotFound:
-                last_error = f"{model_name}: 모델 없음(404)"
-                break   # 이 모델은 없으니 다음 모델로
-            except Exception as e:
-                last_error = f"{model_name}: {e}"
-                break
+        generation_config = {
+            "temperature": temperature,
+            "top_p": 0.9,
+            # 2.5-flash thinking 대비: 큰 폭으로 늘려 thinking 후에도 본문 생성 가능
+            "max_output_tokens": max_output_tokens * 4 if "2.5-flash" in model_name else max_output_tokens,
+        }
+        try:
+            model = genai.GenerativeModel(
+                model_name=model_name,
+                generation_config=generation_config,
+            )
+            resp = model.generate_content(prompt)
+            text = resp.text.strip() if resp.text else ""
+            if text and len(text) > 100:   # 정상 응답 (최소 100자 이상)
+                return text, model_name
+            last_error = f"{model_name}: 너무 짧은 응답 ({len(text)}자)"
+        except gexc.NotFound:
+            last_error = f"{model_name}: 모델 없음(404)"
+        except Exception as e:
+            last_error = f"{model_name}: {type(e).__name__} {e}"
 
     raise RuntimeError(f"모든 모델 시도 실패. 마지막 오류: {last_error}")
 
@@ -523,17 +519,25 @@ def parse_press_json(raw, lang="Korean"):
             "body":     clean_text_final(fix_newlines(data.get("body", "")), lang),
         }
     except json.JSONDecodeError:
-        # 마지막 수단: 줄 단위 fallback
-        lines = [l.strip() for l in cleaned.split('\n') if l.strip()]
-        # 혹시 JSON 형태 키-값이 남아있으면 제거
-        def strip_json_key(line):
-            m = re.match(r'^"(title|subtitle|body)"\s*:\s*"?(.*?)"?,?\s*$', line)
-            return m.group(2) if m else line
-        lines = [strip_json_key(l) for l in lines if l not in ('{', '}')]
+        # JSON이 잘렸을 때 — 각 필드를 정규식으로 따로 추출 (DOTALL · greedy)
+        # title/subtitle은 한 줄로 끝나는 경우가 많고, body는 마지막까지 흐름
+        def extract_field(field_name, text, is_last=False):
+            if is_last:
+                # body: 다음 필드가 없거나 JSON 끝일 수 있음 → 끝까지 모두 가져옴
+                pattern = rf'"{field_name}"\s*:\s*"(.*?)(?:"\s*[,}}]|\Z)'
+            else:
+                # title, subtitle: 다음 `",` 또는 `"\n` 까지
+                pattern = rf'"{field_name}"\s*:\s*"(.*?)"\s*,'
+            m = re.search(pattern, text, re.DOTALL)
+            return m.group(1) if m else ""
+
+        title    = extract_field("title", cleaned, is_last=False)
+        subtitle = extract_field("subtitle", cleaned, is_last=False)
+        body     = extract_field("body", cleaned, is_last=True)
         return {
-            "title":    clean_text_final(lines[0], lang) if lines else "",
-            "subtitle": clean_text_final(lines[1], lang) if len(lines) > 1 else "",
-            "body":     fix_newlines("\n\n".join(clean_text_final(l, lang) for l in lines[2:])),
+            "title":    clean_text_final(title, lang),
+            "subtitle": clean_text_final(subtitle, lang),
+            "body":     clean_text_final(fix_newlines(body), lang),
         }
 
 
