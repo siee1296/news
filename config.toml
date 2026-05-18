@@ -1,0 +1,12 @@
+[server]
+maxUploadSize = 10        # 사진 업로드 최대 10MB
+
+[theme]
+primaryColor      = "#0A1E3F"   # 서정대 네이비
+backgroundColor   = "#FFFFFF"
+secondaryBackgroundColor = "#F0F2F6"
+textColor         = "#1A1A1A"
+font              = "sans serif"
+
+[browser]
+gatherUsageStats = false

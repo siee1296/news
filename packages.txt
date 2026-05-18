@@ -1,1 +1,2 @@
 fonts-noto-cjk
+fonts-noto

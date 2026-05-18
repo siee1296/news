@@ -1,0 +1,29 @@
+@echo off
+chcp 65001 > nul
+echo.
+echo  ====================================================
+echo   SEOJEONG 보도자료 아키텍트 V8.0
+echo   로컬 실행 스크립트
+echo  ====================================================
+echo.
+
+REM ── 작업 디렉토리를 배치파일 위치로 고정 ──
+cd /d "%~dp0"
+
+REM ── venv가 있으면 활성화 ──
+if exist ".venv\Scripts\activate.bat" (
+    call .venv\Scripts\activate.bat
+) else if exist "venv\Scripts\activate.bat" (
+    call venv\Scripts\activate.bat
+)
+
+REM ── 의존성 확인 (최초 실행 또는 requirements 변경 시) ──
+echo [1/2] 의존성 확인 중...
+pip install -r requirements.txt -q
+
+REM ── 앱 실행 ──
+echo [2/2] 앱 시작 중...
+echo.
+streamlit run seojeong_press_v8.py --server.port 8501
+
+pause
